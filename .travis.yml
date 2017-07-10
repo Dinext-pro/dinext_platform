@@ -7,9 +7,6 @@ addons:
       - google-chrome
     packages:
       - google-chrome-stable
-  # sauce_connect:
-  #   username: "rmehta1"
-  #   access_key: "REDACTED"
 
 python:
   - "2.7"
