@@ -10,10 +10,10 @@ from frappe.desk.form import assign_to
 
 class AutoAssign(Document):
 	def on_update(self): # pylint: disable=no-self-use
-		frappe.cache().delete_value('auto_assign')
+		frappe.cache().delete_value('assignment_rule')
 
 	def after_rename(self): # pylint: disable=no-self-use
-		frappe.cache().delete_value('auto_assign')
+		frappe.cache().delete_value('assignment_rule')
 
 	def apply(self, doc):
 		if self.safe_eval('assign_condition', doc):
@@ -97,12 +97,12 @@ def apply(doc, method):
 	if frappe.flags.in_patch or frappe.flags.in_install:
 		return
 
-	auto_assigns = frappe.cache().get_value('auto_assign', get_auto_assigns)
-	if doc.doctype in auto_assigns:
+	assignment_rules = frappe.cache().get_value('assignment_rule', get_assignment_rules)
+	if doc.doctype in assignment_rules:
 		# multiple auto assigns
-		for d in frappe.db.get_all('Auto Assign', dict(document_type=doc.doctype, disabled = 0), order_by = 'priority desc'):
-			if frappe.get_doc('Auto Assign', d.name).apply(doc.as_dict()):
+		for d in frappe.db.get_all('Assignment Rule', dict(document_type=doc.doctype, disabled = 0), order_by = 'priority desc'):
+			if frappe.get_doc('Assignment Rule', d.name).apply(doc.as_dict()):
 				break
 
-def get_auto_assigns():
-	return [d.document_type for d in frappe.db.get_all('Auto Assign', fields=['document_type'], filters=dict(disabled = 0))]
+def get_assignment_rules():
+	return [d.document_type for d in frappe.db.get_all('Assignment Rule', fields=['document_type'], filters=dict(disabled = 0))]

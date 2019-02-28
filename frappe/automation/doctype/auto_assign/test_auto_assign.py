@@ -9,7 +9,7 @@ from frappe.utils import random_string
 
 class TestAutoAssign(unittest.TestCase):
 	def setUp(self):
-		self.auto_assign = get_auto_assign()
+		self.assignment_rule = get_assignment_rule()
 		clear_assignments()
 
 	def test_round_robin(self):
@@ -53,8 +53,8 @@ class TestAutoAssign(unittest.TestCase):
 		), 'owner'), 'test@example.com')
 
 	def test_load_balancing(self):
-		self.auto_assign.rule = 'Load Balancing'
-		self.auto_assign.save()
+		self.assignment_rule.rule = 'Load Balancing'
+		self.assignment_rule.save()
 
 		for _ in range(30):
 			note = make_note(dict(public=1))
@@ -121,12 +121,12 @@ class TestAutoAssign(unittest.TestCase):
 def clear_assignments():
 	frappe.db.sql("delete from tabToDo where reference_type = 'Note'")
 
-def get_auto_assign():
-	frappe.delete_doc_if_exists('Auto Assign', 'For Note 1')
+def get_assignment_rule():
+	frappe.delete_doc_if_exists('Assignment Rule', 'For Note 1')
 
-	auto_assign = frappe.get_doc(dict(
+	assignment_rule = frappe.get_doc(dict(
 		name = 'For Note 1',
-		doctype = 'Auto Assign',
+		doctype = 'Assignment Rule',
 		priority = 0,
 		document_type = 'Note',
 		assign_condition = 'public == 1',
@@ -139,12 +139,12 @@ def get_auto_assign():
 		]
 	)).insert()
 
-	frappe.delete_doc_if_exists('Auto Assign', 'For Note 2')
+	frappe.delete_doc_if_exists('Assignment Rule', 'For Note 2')
 
 	# 2nd rule
 	frappe.get_doc(dict(
 		name = 'For Note 2',
-		doctype = 'Auto Assign',
+		doctype = 'Assignment Rule',
 		priority = 1,
 		document_type = 'Note',
 		assign_condition = 'notify_on_login == 1',
@@ -156,7 +156,7 @@ def get_auto_assign():
 	)).insert()
 
 
-	return auto_assign
+	return assignment_rule
 
 def make_note(values=None):
 	note = frappe.get_doc(dict(
