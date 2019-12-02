@@ -3,7 +3,7 @@
  "app": "ERPNext",
  "creation": "2019-11-22 13:25:42.892593",
  "docstatus": 0,
- "doctype": "Setup Wizard Slide",
+ "doctype": "Onboarding Slide",
  "domains": [],
  "help_links": [
   {
