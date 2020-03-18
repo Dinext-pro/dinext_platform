@@ -5,51 +5,20 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
-  "sb_00",
-  "export_package",
-  "export",
-  "sb_01",
-  "import_package",
-  "import"
+  "export_package"
  ],
  "fields": [
   {
-   "fieldname": "sb_00",
-   "fieldtype": "Section Break",
-   "label": "Export Package"
-  },
-  {
-   "depends_on": "export_package",
-   "fieldname": "export",
-   "fieldtype": "Button",
-   "label": "Export"
-  },
-  {
-   "fieldname": "sb_01",
-   "fieldtype": "Section Break",
-   "label": "Import Package"
-  },
-  {
-   "depends_on": "import_package",
-   "fieldname": "import",
-   "fieldtype": "Button",
-   "label": "Import"
-  },
-  {
+   "description": "Click on the row for accessing filters.",
    "fieldname": "export_package",
    "fieldtype": "Table",
    "label": "Package",
    "options": "Package DocType"
-  },
-  {
-   "fieldname": "import_package",
-   "fieldtype": "Attach",
-   "label": "Attach"
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2020-03-14 11:52:58.221081",
+ "modified": "2020-03-17 16:41:13.542896",
  "modified_by": "Administrator",
  "module": "Custom",
  "name": "Package",
