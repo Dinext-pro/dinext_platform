@@ -4,7 +4,7 @@
     "build": "node rollup/build.js",
     "production": "FRAPPE_ENV=production node rollup/build.js",
     "watch": "node rollup/watch.js",
-    "cypress:run": "cypress run --record --key REDACTED",
+    "cypress:run": "cypress run --browser chrome --record --key REDACTED",
     "cypress:open": "cypress open",
     "snyk-protect": "snyk protect",
     "prepare": "yarn run snyk-protect"
