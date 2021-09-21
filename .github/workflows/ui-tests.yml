@@ -141,7 +141,7 @@ jobs:
           CYPRESS_RECORD_KEY: REDACTED
 
       - name: Upload Coverage Data
-        if: ${{ steps.check-build.outputs.build == 'strawberry' }}
+        if: ${{ steps.check-build.outputs.build == 'strawberry' && hashFiles('/home/runner/frappe-bench/apps/frappe/.cypress-coverage/clover.xml') != '' }}
         uses: codecov/codecov-action@v2
         with:
           name: Cypress
