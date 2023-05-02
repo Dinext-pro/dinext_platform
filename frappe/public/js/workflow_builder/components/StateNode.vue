@@ -1,5 +1,5 @@
 <script setup>
-import { Handle, Position } from "@vue-flow/core";
+import { Handle } from "@vue-flow/core";
 
 const props = defineProps({
 	node: {
@@ -13,10 +13,14 @@ const props = defineProps({
 	<div class="node" tabindex="0">
 		<div v-if="node.label" class="node-label">{{ node.label }}</div>
 		<div v-else class="node-placeholder text-muted">{{ __("No Label") }}</div>
-		<Handle class="handle handle-a" type="source" :position="Position.Top" id="a" />
-		<Handle class="handle handle-b" type="source" :position="Position.Right" id="b" />
-		<Handle class="handle handle-c" type="source" :position="Position.Bottom" id="c" />
-		<Handle class="handle handle-d" type="source" :position="Position.Left" id="d" />
+		<Handle
+			v-for="handle in ['top', 'right', 'bottom', 'left']"
+			class="handle"
+			:style="{ [handle]: '-12px'}"
+			type="source"
+			:position="handle"
+			:id="handle"
+		/>
 	</div>
 </template>
 
@@ -44,21 +48,5 @@ const props = defineProps({
 	background-color: var(--gray-600);
 	border-radius: 50%;
 	transition: all 0.2s ease-in-out;
-
-	&.handle-a {
-		top: -12px;
-	}
-
-	&.handle-b {
-		right: -12px;
-	}
-
-	&.handle-c {
-		bottom: -12px;
-	}
-
-	&.handle-d {
-		left: -12px;
-	}
 }
 </style>
