@@ -1,4 +1,3 @@
-import re
 from contextlib import contextmanager
 
 import pymysql
@@ -9,8 +8,6 @@ import frappe
 from frappe.database.database import Database
 from frappe.database.mariadb.schema import MariaDBTable
 from frappe.utils import UnicodeWithAttrs, cstr, get_datetime, get_table_name
-
-_PARAM_COMP = re.compile(r"%\([\w]*\)s")
 
 
 class MariaDBExceptionUtil:
@@ -214,10 +211,11 @@ class MariaDBDatabase(MariaDBConnectionUtil, MariaDBExceptionUtil, Database):
 
 		return db_size[0].get("database_size")
 
-	def log_query(self, query, values, debug, explain):
-		self.last_query = self._cursor._executed
-		self._log_query(self.last_query, debug, explain, query)
-		return self.last_query
+	def log_query(self, query, values, debug):
+		mogrified_query = self._cursor._executed
+		self.last_query = mogrified_query
+		self._log_query(mogrified_query, debug, query)
+		return mogrified_query
 
 	def _clean_up(self):
 		# PERF: Erase internal references of pymysql to trigger GC as soon as
