@@ -1,0 +1,41 @@
+name: Sync Fork
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # каждый день в 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream
+        run: |
+          git remote add upstream https://github.com/frappe/frappe.git
+
+      - name: Fetch everything
+        run: |
+          git fetch upstream --prune --tags
+
+      - name: Sync branches
+        run: |
+          for branch in version-15 version-16 develop; do
+            if git show-ref --verify --quiet refs/remotes/upstream/$branch; then
+              git checkout $branch || git checkout -b $branch origin/$branch
+              git reset --hard upstream/$branch
+              git push origin $branch --force-with-lease
+            fi
+          done
+
+      - name: Push tags
+        run: |
+          git push origin --tags
