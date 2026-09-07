@@ -6,10 +6,12 @@ import copy
 import datetime
 import json
 import re
+import threading
 from collections import Counter
 from functools import lru_cache
 
 import sqlparse
+import sqlparse.engine.grouping
 from sqlparse import tokens
 from sqlparse.sql import Function, Parenthesis, Statement
 
@@ -34,7 +36,9 @@ from frappe.utils import (
 	get_timespan_date_range,
 	make_filter_tuple,
 )
-from frappe.utils.data import DateTimeLikeObject, get_datetime, getdate, sbool
+from frappe.utils.data import convert_type_for_between_filters, sbool
+
+_convert_type_for_between_filters = convert_type_for_between_filters  # bw compatibility
 
 
 @lru_cache(maxsize=128)
@@ -203,6 +207,22 @@ def _find_disallowed_function(node) -> str | None:
 	return None
 
 
+_PARSE_FULL_QUERY_LOCK = threading.Lock()
+
+
+def _parse_full_query(query: str):
+	# Lift sqlparse's 10k-token DoS cap for our own generated query (a large but legitimate
+	# `IN (...)` list can exceed it). Lock keeps the save-restore of the global atomic across
+	# threads, else a concurrent parse can capture None as "original" and leave the cap off.
+	with _PARSE_FULL_QUERY_LOCK:
+		original_limit = sqlparse.engine.grouping.MAX_GROUPING_TOKENS
+		sqlparse.engine.grouping.MAX_GROUPING_TOKENS = None
+		try:
+			return sqlparse.parse(query)
+		finally:
+			sqlparse.engine.grouping.MAX_GROUPING_TOKENS = original_limit
+
+
 @lru_cache(maxsize=1024)
 def validate_generated_query(query: str) -> None:
 	"""Parse a finally generated query and reject constructs a list query must never contain.
@@ -217,7 +237,7 @@ def validate_generated_query(query: str) -> None:
 	7. No subqueries.
 	8. Only functions in `ALLOWED_SQL_FUNCTIONS` are used.
 	"""
-	statements = [s for s in sqlparse.parse(query) if s.token_first(skip_cm=True) is not None]
+	statements = [s for s in _parse_full_query(query) if s.token_first(skip_cm=True) is not None]
 
 	# stacked queries
 	if len(statements) != 1:
@@ -473,7 +493,7 @@ from {tables}
 		user_conditions = self._user_conditions
 		query = "select {fields} from {tables} {conditions} {group_by} {order_by}".format(
 			fields=args.fields,
-			tables=args.tables,
+			tables=self._user_tables,
 			conditions=f"where {user_conditions}" if user_conditions else "",
 			group_by=args.group_by or "",
 			order_by=args.order_by or "",
@@ -498,14 +518,24 @@ from {tables}
 		# query dict
 		args.tables = self.tables[0]
 
+		self._user_tables = self.tables[0]
+
 		# left join parent, child tables
 		for child in self.tables[1:]:
 			parent_name = cast_name(f"{self.tables[0]}.name")
-			args.tables += f" {self.join} {child} on ({child}.parenttype = {frappe.db.escape(self.doctype)} and {child}.parent = {parent_name})"
+			child_join = f" {self.join} {child} on ({child}.parenttype = {frappe.db.escape(self.doctype)} and {child}.parent = {parent_name})"
+			args.tables += child_join
+			self._user_tables += child_join
 
 		# left join link tables
 		for link in self.link_tables:
-			args.tables += f" {self.join} {link.table_name} {link.table_alias} on ({link.table_alias}.`name` = {self.tables[0]}.`{link.fieldname}`)"
+			base_on = f"{link.table_alias}.`name` = {self.tables[0]}.`{link.fieldname}`"
+			self._user_tables += f" {self.join} {link.table_name} {link.table_alias} on ({base_on})"
+
+			on_clause = base_on
+			if link.get("join_conditions"):
+				on_clause += f" and {link.join_conditions}"
+			args.tables += f" {self.join} {link.table_name} {link.table_alias} on ({on_clause})"
 
 		grouped_or_clause = (
 			[f"({' or '.join(self.grouped_or_conditions)})"] if self.grouped_or_conditions else []
@@ -791,8 +821,64 @@ from {tables}
 			table_alias=f"`tab{doctype}_{self.linked_table_counter[doctype]}`",
 		)
 		self.linked_table_aliases[linked_table.table_alias.replace("`", "")] = linked_table.table_name
+
+		if not self.flags.ignore_permissions:
+			linked_table.join_conditions = self._build_linked_join_conditions(
+				doctype, linked_table.table_alias
+			)
+
 		self.link_tables.append(linked_table)
 		return linked_table
+
+	def _build_linked_join_conditions(self, doctype, table_alias):
+		"""Row-level access conditions for a linked doctype, injected into the JOIN ON clause.
+
+		Enforces if_owner constraints and user permissions that would normally restrict
+		direct list queries on the linked doctype, preventing dot-notation field bypass.
+		"""
+		conditions = []
+		role_permissions = frappe.permissions.get_role_permissions(doctype, user=self.user)
+
+		# skip user perm check if owner constraint is required
+		if requires_owner_constraint(role_permissions):
+			conditions.append(f"{table_alias}.`owner` = {frappe.db.escape(self.user, percent=False)}")
+		elif role_permissions.get("read") or role_permissions.get("select"):
+			user_permissions = frappe.permissions.get_user_permissions(self.user)
+			allowed_docs = [
+				p.get("doc")
+				for p in user_permissions.get(doctype, [])
+				if not p.get("applicable_for") or p.get("applicable_for") == self.doctype
+			]
+			if allowed_docs:
+				values = ", ".join(frappe.db.escape(d, percent=False) for d in allowed_docs)
+				conditions.append(f"{table_alias}.`name` in ({values})")
+
+		has_role_read = bool(role_permissions.get("read") or role_permissions.get("select"))
+		if conditions or not has_role_read:
+			shared = frappe.share.get_shared(doctype, self.user)
+			if shared:
+				share_values = ", ".join(frappe.db.escape(s, percent=False) for s in shared)
+				share_cond = f"{table_alias}.`name` in ({share_values})"
+				if conditions:
+					conditions = [f"({' and '.join(conditions)} or {share_cond})"]
+				else:
+					conditions.append(share_cond)
+
+		# apply permission_query_conditions for the linked doctype (hooks + server scripts),
+		# replacing the default table reference with the aliased name used in this JOIN
+		hooks = frappe.get_hooks("permission_query_conditions", {})
+		for method in hooks.get(doctype, []) + hooks.get("*", []):
+			if hook_cond := frappe.call(frappe.get_attr(method), self.user, doctype=doctype):
+				# replace only field-level references (`tabDoctype`.field or `tabDoctype`.`field`)
+				# with the alias, not bare table names inside subqueries (`from `tabDoctype``)
+				conditions.append(hook_cond.replace(f"`tab{doctype}`.", f"{table_alias}."))
+
+		if script_name := get_server_script_map().get("permission_query", {}).get(doctype):
+			script = frappe.get_doc("Server Script", script_name)
+			if script_cond := script.get_permission_query_conditions(self.user):
+				conditions.append(script_cond.replace(f"`tab{doctype}`.", f"{table_alias}."))
+
+		return " and ".join(conditions)
 
 	def check_read_permission(self, doctype: str, parent_doctype: str | None = None):
 		if self.flags.ignore_permissions:
@@ -1260,9 +1346,10 @@ from {tables}
 
 			# add user permission only if role has read perm
 			elif role_permissions.get("read") or role_permissions.get("select"):
-				# get user permissions
-				user_permissions = frappe.permissions.get_user_permissions(self.user)
-				self.add_user_permissions(user_permissions)
+				if frappe.flags.get("ignore_user_permissions_for_doctype") != self.doctype:
+					# get user permissions
+					user_permissions = frappe.permissions.get_user_permissions(self.user)
+					self.add_user_permissions(user_permissions)
 
 			# Only when full read access is not present fetch shared docuemnts.
 			# This is done to avoid extra query.
@@ -1633,8 +1720,8 @@ def get_between_date_filter(value, df=None):
 
 	# if filter value is date but fieldtype is datetime:
 	if fieldtype == "Datetime":
-		from_date = _convert_type_for_between_filters(from_date, set_time=datetime.time())
-		to_date = _convert_type_for_between_filters(to_date, set_time=datetime.time(23, 59, 59, 999999))
+		from_date = convert_type_for_between_filters(from_date, set_time=datetime.time())
+		to_date = convert_type_for_between_filters(to_date, set_time=datetime.time(23, 59, 59, 999999))
 
 	# If filter value is already datetime, do nothing.
 	if fieldtype == "Datetime":
@@ -1643,23 +1730,6 @@ def get_between_date_filter(value, df=None):
 		cond = f"'{frappe.db.format_date(from_date)}' AND '{frappe.db.format_date(to_date)}'"
 
 	return cond
-
-
-def _convert_type_for_between_filters(
-	value: DateTimeLikeObject, set_time: datetime.time
-) -> datetime.datetime:
-	if isinstance(value, str):
-		if " " in value.strip():
-			value = get_datetime(value)
-		else:
-			value = getdate(value)
-
-	if isinstance(value, datetime.datetime):
-		return value
-	elif isinstance(value, datetime.date):
-		return datetime.datetime.combine(value, set_time)
-
-	return value
 
 
 def get_additional_filter_field(additional_filters_config, f, value):

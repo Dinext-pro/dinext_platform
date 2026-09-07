@@ -15,7 +15,17 @@ from frappe.model.utils import render_include
 from frappe.modules import get_module_path, scrub
 from frappe.monitor import add_data_to_monitor
 from frappe.permissions import get_role_permissions, get_roles, has_permission
-from frappe.utils import cint, cstr, flt, format_datetime, format_duration, formatdate, get_html_format, sbool
+from frappe.utils import (
+	cint,
+	create_batch,
+	cstr,
+	flt,
+	format_datetime,
+	format_duration,
+	formatdate,
+	get_html_format,
+	sbool,
+)
 from frappe.utils.caching import request_cache
 
 
@@ -116,7 +126,7 @@ def generate_report_result(
 		total_row = cint(report.add_total_row) and result and not skip_total_row
 		result = translate_report_data(result, total_row)
 
-	return {
+	return_dict = {
 		"result": result,
 		"columns": columns,
 		"message": message,
@@ -126,6 +136,24 @@ def generate_report_result(
 		"status": None,
 		"execution_time": frappe.cache.hget("report_execution_time", report.name) or 0,
 	}
+
+	if report.snapshot_report and report.doctype_to_sync:
+		if latest_sync := frappe.db.get_all(
+			"DuckDB Sync",
+			filters={"doc_type": report.doctype_to_sync[0].doc_type, "docstatus": 1},
+			fields=["creation"],
+			pluck="creation",
+			order_by="creation desc",
+			limit=1,
+		):
+			return_dict.update(
+				{
+					"snapshot_report": True,
+					"snapshot_at": latest_sync[0],
+				}
+			)
+
+	return return_dict
 
 
 def normalize_result(result, columns):
@@ -145,7 +173,7 @@ def normalize_result(result, columns):
 
 
 @frappe.whitelist()
-def get_script(report_name):
+def get_script(report_name: str):
 	report = get_report_doc(report_name)
 	module = report.module or frappe.db.get_value("DocType", report.ref_doctype, "module")
 
@@ -244,6 +272,8 @@ def _run(
 					filters = json.loads(filters)
 
 				dn = filters.pop("prepared_report_name", None)
+				if dn:
+					frappe.has_permission("Prepared Report", "read", dn, throw=True)
 			else:
 				dn = ""
 			result = get_prepared_report_result(report, filters, dn, user)
@@ -626,17 +656,23 @@ def add_total_row(result, columns, meta=None, is_tree=False, parent_field=None):
 
 
 @frappe.whitelist()
-def get_data_for_custom_field(doctype, field, names=None):
+def get_data_for_custom_field(doctype: str, field: str, names: str | list[str] | None = None):
 	if not frappe.has_permission(doctype, "read"):
 		frappe.throw(_("Not Permitted to read {0}").format(_(doctype)), frappe.PermissionError)
 
-	filters = {}
-	if names:
-		if isinstance(names, str | bytearray):
-			names = frappe.json.loads(names)
-		filters.update({"name": ["in", names]})
+	if not names:
+		return frappe._dict(frappe.get_list(doctype, fields=["name", field], as_list=1))
 
-	return frappe._dict(frappe.get_list(doctype, filters=filters, fields=["name", field], as_list=1))
+	if isinstance(names, str | bytearray):
+		names = frappe.json.loads(names)
+
+	value_map = frappe._dict()
+	for batch in create_batch(names, 1000):
+		value_map.update(
+			frappe.get_list(doctype, filters={"name": ["in", batch]}, fields=["name", field], as_list=1)
+		)
+
+	return value_map
 
 
 def get_data_for_custom_report(columns, result):
@@ -667,7 +703,7 @@ def get_data_for_custom_report(columns, result):
 
 
 @frappe.whitelist()
-def save_report(reference_report, report_name, columns, filters):
+def save_report(reference_report: str, report_name: str, columns: str, filters: str):
 	report_doc = get_report_doc(reference_report)
 
 	docname = frappe.db.exists(
