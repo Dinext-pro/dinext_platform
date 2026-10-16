@@ -1,0 +1,8 @@
+{
+  "app": "frappe",
+  "package_dir": "frappe",
+  "mode": "platform-smoke",
+  "gitflow": false,
+  "frontend_tests": false,
+  "skip_test_records": false
+}
