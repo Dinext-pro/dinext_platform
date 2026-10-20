@@ -1,4 +1,5 @@
 import type { Component } from "vue";
+import type { UploadedMedia } from "frappe-ui/editor";
 
 export interface ActivityTimelineProps {
   /** Rows in display order. Custom types render via the `#item-{type}` slot. */
@@ -24,7 +25,7 @@ export interface Pagination {
     position?: "top" | "bottom" | "inline";
     /** Button copy; default "Load more" / "lucide-refresh-cw". */
     label?: string;
-    /** lucide-* string, FeatherIcon name, or a component — same as `Button`'s icon. */
+    /** lucide-* string or a component — same as `Button`'s icon. */
     icon?: string | Component;
   };
 }
@@ -51,6 +52,8 @@ export interface BaseActivity<TType extends string, TData> {
   author?: UserInfo;
   /** lucide name or component; per-type default when absent */
   icon?: string | Component;
+  /** set by addPendingActivity: not confirmed by the server yet, rendered muted */
+  pending?: boolean;
   data: TData;
 }
 
@@ -74,6 +77,7 @@ export type CommentActivity = BaseActivity<
   {
     name: string;
     content: string;
+    attachments?: EmailAttachment[];
   }
 >;
 
@@ -169,6 +173,16 @@ export type CustomActivity = Omit<BaseActivity<string, unknown>, "key"> & {
   key?: string;
 };
 
+/** e.g. ["email", "comment", { version: ["status", "priority"] }] */
+export type VisibleTypes = Array<Activity["type"] | { version: string[] }>;
+
+export interface PendingActivity {
+  /** tell the row which key the server gave it; it retires when that row arrives */
+  resolve: (key: string) => void;
+  /** take the row back, e.g. the request failed */
+  drop: () => void;
+}
+
 // —— Per-activity-row components (rendered by ActivityTimeline via its type slots) ——
 
 export interface EmailItemProps {
@@ -186,6 +200,10 @@ export interface EmailItemSlots {
 export interface CommentItemProps {
   comment: CommentActivity;
   editable?: boolean;
+  /** classes on the editor content; default "prose-sm max-w-none" */
+  editorClass?: string;
+  /** image upload handler passed through to the editor while editing */
+  uploadFunction?: (file: File) => Promise<UploadedMedia>;
 }
 export interface CommentItemSlots {
   /** Replaces the row header (author, timestamp). */

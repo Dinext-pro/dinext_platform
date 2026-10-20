@@ -156,7 +156,7 @@ frappe.ui.notifications = {
 			}
 			$.extend(frappe.route_options, filters);
 		}
-		frappe.set_route("List", doctype);
+		frappe.set_route("List", doctype, "List");
 	},
 };
 
@@ -254,15 +254,9 @@ class NotificationsView extends BaseNotificationsView {
 			? message.replace(title[1], frappe.ellipsis(strip_html(title[1]), 100))
 			: message;
 
-		let description = notification_log.description || "";
-		let description_html = description
-			? `<div class="notification-description text-muted">${description}</div>`
-			: "";
-
 		let timestamp = frappe.datetime.comment_when(notification_log.creation);
 		let message_html = `<div class="message">
 			<div>${message}</div>
-			${description_html}
 			<div class="notification-timestamp text-muted">
 				${timestamp}
 			</div>
@@ -437,13 +431,15 @@ class EventsView extends BaseNotificationsView {
 				// REDESIGN-TODO: Add location to calendar field
 				let location = "";
 				if (event.location) {
-					location = `, ${event.location}`;
+					location = `, ${frappe.utils.escape_html(event.location)}`;
 				}
 
-				return `<a class="recent-item event" href="/app/event/${event.name}">
-					<div class="event-border" style="border-color: ${event.color}"></div>
+				return `<a class="recent-item event" href="/app/event/${frappe.utils.escape_html(
+					event.name
+				)}">
+					<div class="event-border" style="border-color: ${frappe.utils.escape_html(event.color)}"></div>
 					<div class="event-item">
-						<div class="event-subject">${event.subject}</div>
+						<div class="event-subject">${frappe.utils.escape_html(event.subject)}</div>
 						<div class="event-time">${time}${location}</div>
 						${particpants}
 					</div>
