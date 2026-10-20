@@ -8,7 +8,7 @@ from collections import namedtuple
 import frappe
 from frappe import _
 from frappe.core.doctype.role.role import get_info_based_on_role, get_user_info
-from frappe.core.doctype.sms_settings.sms_settings import send_sms
+from frappe.core.doctype.sms_settings.sms_settings import _send_sms as send_via_sms_gateway
 from frappe.desk.doctype.notification_log.notification_log import enqueue_create_notification
 from frappe.integrations.doctype.slack_webhook_url.slack_webhook_url import send_slack_message
 from frappe.model.document import Document
@@ -190,9 +190,7 @@ def get_context(context):
 		"""Build recipients and send Notification"""
 
 		context = get_context(doc)
-		context = {"doc": doc, "alert": self, "comments": None}
-		if doc.get("_comments"):
-			context["comments"] = json.loads(doc.get("_comments"))
+		context = {"doc": doc, "alert": self, "comments": get_comments_for_context(doc)}
 
 		if self.is_standard:
 			self.load_standard_properties(context)
@@ -364,7 +362,7 @@ def get_context(context):
 		)
 
 	def send_sms(self, doc, context):
-		send_sms(
+		send_via_sms_gateway(
 			receiver_list=self.get_receiver_list(doc, context),
 			msg=frappe.render_template(self.message, context),
 		)
@@ -585,6 +583,37 @@ def evaluate_alert(doc: Document, alert, event):
 		frappe.log_error(title=title, message=message)
 		msg = f"<details><summary>{title}</summary>{message}</details>"
 		frappe.throw(msg, title=_("Error in Notification"))
+
+
+def get_comments_for_context(doc):
+	"""`{{ comments }}` for notification templates, in the shape the `_comments` cache had."""
+	if not doc.get("name"):
+		return None
+
+	reference = {"reference_doctype": doc.doctype, "reference_name": doc.name}
+	comments = frappe.get_all(
+		"Comment",
+		fields=["name", "content", "comment_email as author", "owner", "creation"],
+		filters=reference | {"comment_type": "Comment"},
+		order_by="creation desc",
+		limit=100,
+	) + frappe.get_all(
+		"Communication",
+		fields=["name", "content", "sender as author", "owner", "creation"],
+		filters=reference,
+		order_by="creation desc",
+		limit=100,
+	)
+	comments.sort(key=lambda c: c.creation)
+	return [
+		{"comment": truncate(c.content), "by": c.author or c.owner, "name": c.name} for c in comments[-100:]
+	] or None
+
+
+def truncate(content):
+	"""Preview length the `_comments` cache used to hand templates."""
+	content = content or ""
+	return (content[:97] + "...") if len(content) > 100 else content
 
 
 def get_context(doc):

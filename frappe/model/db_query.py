@@ -297,6 +297,7 @@ class DatabaseQuery:
 		self.ignore_ifnull = False
 		self.flags = frappe._dict()
 		self.reference_doctype = None
+		self.parent_doctype = None
 		self.permission_map = {}
 		self.shared = []
 		self._fetch_shared_documents = False
@@ -418,6 +419,7 @@ class DatabaseQuery:
 			} | self.__dict__
 			return controller.get_list(kwargs)
 
+		self.with_comment_count = sbool(with_comment_count) and not as_list and bool(self.doctype)
 		self.columns = self.get_table_columns()
 
 		# no table & ignore_ddl, return
@@ -426,7 +428,7 @@ class DatabaseQuery:
 
 		result = self.build_and_run()
 
-		if sbool(with_comment_count) and not as_list and self.doctype:
+		if self.with_comment_count:
 			self.add_comment_count(result)
 
 		if save_user_settings:
@@ -507,6 +509,14 @@ from {tables}
 		self.set_optional_columns()
 		self.build_conditions()
 		self.apply_fieldlevel_read_permissions()
+		# read now: table prefixes and postgres casts below rewrite the fields
+		self.has_own_name = self.selects_own_name()
+		if self.with_comment_count and self.distinct and not self.has_own_name:
+			# a distinct row without the document's name can stand for several documents
+			self.with_comment_count = False
+		# selected after the permission check: never user-requestable, popped in add_comment_count
+		if self.with_comment_count and not self.group_by and "_comments" in self.columns:
+			self.fields.append(f"`tab{self.doctype}`.`_comments`")
 
 		args = frappe._dict()
 
@@ -1026,6 +1036,13 @@ from {tables}
 			if not columns:
 				continue
 
+			# `_comments` is a cache column, unreadable even inside an expression with permitted fields
+			if frappe.session.user != "Administrator" and any(
+				c.rsplit(".", 1)[-1].strip("`") == "_comments" for c in columns
+			):
+				self.remove_field(i)
+				continue
+
 			column = columns[0]
 			# handle * fields
 			if column == "*" and "*" in field:
@@ -1096,6 +1113,14 @@ from {tables}
 
 		additional_filters_config = get_additional_filters_from_hooks()
 		f = get_filter(self.doctype, f, additional_filters_config)
+
+		# `_comments` is a cache column, never a filterable field
+		if (
+			f.fieldname == "_comments"
+			and not self.flags.ignore_permissions
+			and frappe.session.user != "Administrator"
+		):
+			raise frappe.PermissionError(f.fieldname)
 
 		tname = "`tab" + f.doctype + "`"
 		if tname not in self.tables:
@@ -1373,10 +1398,42 @@ from {tables}
 			if not only_if_shared and self.shared and conditions:
 				conditions = f"(({conditions}) or ({self.get_share_condition()}))"
 
+			if self.doctype_meta.istable and self.parent_doctype:
+				parent_condition = self.get_parent_row_permission_condition()
+				if parent_condition:
+					conditions += (" and " + parent_condition) if conditions else parent_condition
+
 			return conditions
 
 		else:
 			return self.match_filters
+
+	def get_parent_row_permission_condition(self) -> str:
+		"""Restrict child rows to parents the user has row-level (not just doctype-level) access to.
+
+		check_read_permission() only checks doctype-level read on parent_doctype; this folds
+		in the parent's own row-level conditions (User Permission/owner/share) as a subquery.
+		"""
+		if self.flags.ignore_permissions:
+			return ""
+
+		parent_meta = frappe.get_meta(self.parent_doctype)
+		if parent_meta.issingle:
+			return ""
+
+		parent_query = DatabaseQuery(self.parent_doctype, user=self.user)
+		# thread through reference_doctype: applicable_for-scoped User Permissions on the
+		# parent's own "name" field are matched against it (see build_match_conditions),
+		# and a bare DatabaseQuery() otherwise leaves it unset
+		parent_query.reference_doctype = self.reference_doctype
+		parent_condition = parent_query.build_match_conditions()
+		if not parent_condition:
+			return ""
+
+		return (
+			f"`tab{self.doctype}`.`parent` in "
+			f"(select `name` from `tab{self.parent_doctype}` where {parent_condition})"
+		)
 
 	def get_share_condition(self):
 		return (
@@ -1585,12 +1642,21 @@ from {tables}
 
 	def add_comment_count(self, result):
 		for r in result:
-			if not r.name:
+			comments = r.pop("_comments", None)
+			# the own name under any alias, like `name as id`, makes every row one document
+			if not (self.has_own_name or r.name):
 				continue
 
-			r._comment_count = 0
-			if "_comments" in r:
-				r._comment_count = len(json.loads(r._comments or "[]"))
+			# perf: Avoid parsing _comments, this is just a "UX feature"
+			r._comment_count = comments.count('"name"') if comments else 0
+
+	def selects_own_name(self) -> bool:
+		"""Distinct rows stay one per document only when they carry the document's own name."""
+		table = f"`tab{self.doctype}`"
+		own = {"*", "name", "`name`", f"{table}.*", f"{table}.`name`", f"{table}.name"}
+		return any(
+			re.split(r"\s+as\s+", f, maxsplit=1, flags=re.IGNORECASE)[0].strip() in own for f in self.fields
+		)
 
 	def update_user_settings(self):
 		# update user settings if new search

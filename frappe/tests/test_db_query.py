@@ -11,6 +11,7 @@ from frappe.custom.doctype.property_setter.property_setter import make_property_
 from frappe.database.utils import DefaultOrderBy
 from frappe.desk.reportview import get_filters_cond
 from frappe.handler import execute_cmd
+from frappe.model import get_permitted_fields
 from frappe.model.db_query import DatabaseQuery, get_between_date_filter
 from frappe.permissions import add_user_permission, clear_user_permissions_for_doctype
 from frappe.query_builder import Column
@@ -397,6 +398,82 @@ class TestDBQuery(FrappeTestCase):
 		end = "2022-01-02 12:23:43"
 		cond = get_between_date_filter([start, end], datetime_df)
 		self.assertQueryEqual(cond, f"'{start}.000000' AND '{end}.000000'")
+
+	def test_comments_blob_not_readable(self):
+		with setup_test_user(set_user=True):
+			row = frappe.get_list("Blog Post", fields=["name", "_comments"], with_comment_count=1, limit=1)[0]
+			self.assertNotIn("_comments", row)
+			self.assertIn("_comment_count", row)
+			# legacy engine, row without name
+			row = DatabaseQuery("Blog Post").execute(
+				fields=["title"], with_comment_count=1, limit_page_length=1
+			)[0]
+			self.assertNotIn("_comments", row)
+			row = frappe.get_list(
+				"Blog Post", fields=["name", "ifnull(nullif(name, name), _comments) as leaked"], limit=1
+			)[0]
+			self.assertNotIn("leaked", row)
+			with self.assertRaises(frappe.PermissionError):
+				frappe.get_list("Blog Post", filters={"_comments": ("like", "%a%")})
+			# core doctypes permit every table column, so the cache column must not be one
+			self.assertNotIn("_comments", get_permitted_fields("Module Def"))
+			self.assertNotIn(
+				"_comments", frappe.get_list("Module Def", fields=["name", "_comments"], limit=1)[0]
+			)
+			with self.assertRaises(frappe.PermissionError):
+				frappe.get_list("Module Def", filters={"_comments": ("like", "%a%")})
+
+	def test_comment_count_keeps_distinct(self):
+		with setup_test_user(set_user=True):
+			commented = frappe.get_doc(doctype="ToDo", description="distinct comment count").insert()
+			plain = frappe.get_doc(doctype="ToDo", description="distinct comment count").insert()
+			commented.add_comment("Comment", "only on one")
+			args = dict(
+				filters={"name": ("in", [commented.name, plain.name])}, distinct=True, with_comment_count=1
+			)
+			rows = frappe.get_list("ToDo", fields=["description"], **args)
+			self.assertEqual(len(rows), 1)
+			self.assertNotIn("_comment_count", rows[0])
+			rows = frappe.get_list("ToDo", fields=["name"], **args)
+			self.assertEqual({r.name: r._comment_count for r in rows}, {commented.name: 1, plain.name: 0})
+			rows = frappe.get_list("ToDo", fields=["name as name"], **args)
+			self.assertEqual({r.name: r._comment_count for r in rows}, {commented.name: 1, plain.name: 0})
+			# the name under another alias, in either case, still maps rows to documents
+			rows = frappe.get_list("ToDo", fields=["name AS id"], **args)
+			self.assertEqual({r.id: r._comment_count for r in rows}, {commented.name: 1, plain.name: 0})
+			# postgres casts a qualified name, which must not hide its alias
+			rows = frappe.get_list("ToDo", fields=["`tabToDo`.`name` as id"], **args)
+			self.assertEqual({r.id: r._comment_count for r in rows}, {commented.name: 1, plain.name: 0})
+			# an alias is not the document's name, so it must not split rows or get a count
+			rows = frappe.get_list("ToDo", fields=["description as name"], **args)
+			self.assertEqual(len(rows), 1)
+			self.assertNotIn("_comment_count", rows[0])
+			# `*` carries the name, also when permissions leave it unexpanded
+			rows = frappe.get_list("ToDo", fields=["*"], ignore_permissions=True, **args)
+			self.assertEqual({r.name: r._comment_count for r in rows}, {commented.name: 1, plain.name: 0})
+			self.assertNotIn("_comments", rows[0])
+			# child tables have no comment cache
+			rows = frappe.get_all("DocField", fields=["name"], distinct=True, with_comment_count=1, limit=1)
+			self.assertEqual(rows[0]._comment_count, 0)
+
+	def test_comment_count_skips_self_link_name(self):
+		with setup_test_user(set_user=True):
+			folder = frappe.get_doc(
+				doctype="File", file_name=frappe.generate_hash(length=8), is_folder=1
+			).insert()
+			for i in range(2):
+				frappe.get_doc(
+					doctype="File", file_name=f"comment count {i}.txt", content="x", folder=folder.name
+				).insert().add_comment("Comment", f"comment {i}")
+			rows = frappe.get_list(
+				"File",
+				fields=["folder.name"],
+				filters={"folder": folder.name},
+				distinct=True,
+				with_comment_count=1,
+			)
+			# the linked folder's name is not the row's own name, so files must not split the row
+			self.assertEqual([tuple(row.values()) for row in rows], [(folder.name,)])
 
 	def test_ignore_permissions_for_get_filters_cond(self):
 		frappe.set_user("test2@example.com")
@@ -1575,6 +1652,143 @@ class TestDotNotationPermission(FrappeTestCase):
 				frappe.get_list(self.PARENT, filters={"name": self.p_up_a.name}, fields=["up_link.secret"])
 			except frappe.exceptions.DataError:
 				self.fail("DataError raised — _user_tables split is not working")
+
+
+class TestChildTableParentRowPermission(FrappeTestCase):
+	"""Direct child-table queries (parent_doctype=...) must respect the parent's own
+	row-level restrictions (User Permissions), not just doctype-level read on the parent."""
+
+	ROLE = "CT Test Role"
+	USER = "ct_test@example.com"
+	OWNER = "CT Test Owner"  # linked doctype that User Permission scopes against
+	PARENT = "CT Test Parent"
+	CHILD = "CT Test Child"
+
+	@classmethod
+	def _cleanup(cls):
+		frappe.set_user("Administrator")
+		for dt in (cls.PARENT, cls.CHILD, cls.OWNER):
+			if frappe.db.exists("DocType", dt):
+				for n in frappe.get_all(dt, pluck="name"):
+					frappe.delete_doc(dt, n, force=True, ignore_permissions=True)
+				frappe.delete_doc("DocType", dt, force=True, ignore_permissions=True)
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls._cleanup()
+		frappe.set_user("Administrator")
+
+		if not frappe.db.exists("Role", cls.ROLE):
+			frappe.get_doc({"doctype": "Role", "role_name": cls.ROLE}).insert()
+		if not frappe.db.exists("User", cls.USER):
+			frappe.get_doc(
+				{"doctype": "User", "email": cls.USER, "first_name": "CT", "new_password": "test"}
+			).insert(ignore_permissions=True)
+		frappe.get_doc("User", cls.USER).add_roles(cls.ROLE)
+
+		new_doctype(cls.OWNER).insert(ignore_permissions=True)
+		new_doctype(
+			cls.CHILD,
+			istable=1,
+			fields=[{"fieldname": "value", "fieldtype": "Data", "label": "Value"}],
+		).insert(ignore_permissions=True)
+		new_doctype(
+			cls.PARENT,
+			fields=[
+				{"fieldname": "owner_ref", "fieldtype": "Link", "label": "Owner Ref", "options": cls.OWNER},
+				{"fieldname": "items", "fieldtype": "Table", "label": "Items", "options": cls.CHILD},
+			],
+			# plain doctype-level read, no if_owner: row scoping relies entirely on the
+			# User Permission on the linked OWNER doctype, same shape as many real-world setups
+			permissions=[
+				{"role": cls.ROLE, "read": 1},
+				{"role": "System Manager", "read": 1, "write": 1, "create": 1},
+			],
+		).insert(ignore_permissions=True)
+
+		cls.owner_a = frappe.get_doc({"doctype": cls.OWNER, "some_fieldname": "a"}).insert(
+			ignore_permissions=True
+		)
+		cls.owner_b = frappe.get_doc({"doctype": cls.OWNER, "some_fieldname": "b"}).insert(
+			ignore_permissions=True
+		)
+
+		def ins(owner):
+			return frappe.get_doc(
+				{
+					"doctype": cls.PARENT,
+					"owner_ref": owner.name,
+					"items": [{"value": f"{owner.name}-row"}],
+				}
+			).insert(ignore_permissions=True)
+
+		cls.parent_a = ins(cls.owner_a)
+		cls.parent_b = ins(cls.owner_b)
+
+	@classmethod
+	def tearDownClass(cls):
+		cls._cleanup()
+		for dt, name in [("User", cls.USER), ("Role", cls.ROLE)]:
+			if frappe.db.exists(dt, name):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		super().tearDownClass()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		clear_user_permissions_for_doctype(self.OWNER, self.USER)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		clear_user_permissions_for_doctype(self.OWNER, self.USER)
+
+	def _child_rows(self, parent):
+		return DatabaseQuery(self.CHILD).execute(
+			filters=[["parent", "=", parent.name], ["parenttype", "=", self.PARENT]],
+			fields=["value", "parent"],
+			parent_doctype=self.PARENT,
+		)
+
+	def test_build_match_conditions_without_execute_does_not_crash(self):
+		"""build_match_conditions() can be called directly on a child doctype without going
+		through execute() first (e.g. reportview.get_match_cond/build_match_conditions) —
+		parent_doctype must not be read before it's ever been set."""
+		frappe.set_user(self.USER)
+		self.assertEqual(DatabaseQuery(self.CHILD).build_match_conditions(), "")
+
+	def test_child_query_blocks_out_of_scope_parent_rows(self):
+		add_user_permission(self.OWNER, self.owner_a.name, self.USER)
+		frappe.set_user(self.USER)
+		self.assertEqual(self._child_rows(self.parent_b), [])
+
+	def test_child_query_allows_in_scope_parent_rows(self):
+		add_user_permission(self.OWNER, self.owner_a.name, self.USER)
+		frappe.set_user(self.USER)
+		rows = self._child_rows(self.parent_a)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0]["value"], f"{self.owner_a.name}-row")
+
+	def test_child_query_honors_contextual_permission_on_parent_identity(self):
+		"""A User Permission scoped directly to the parent doctype's own identity, with
+		applicable_for set to the doctype actually being queried (the reference doctype),
+		must still be honored on the child-table route — not just permissions on a link field.
+
+		If the reference doctype isn't threaded through correctly, this doesn't merely deny
+		access: the applicable_for check silently matches nothing, no restricting condition
+		gets added at all, and every parent's rows become visible — so both directions must
+		be checked, not just that the in-scope row is still readable."""
+		try:
+			add_user_permission(self.PARENT, self.parent_a.name, self.USER, applicable_for=self.CHILD)
+			frappe.set_user(self.USER)
+
+			rows_a = self._child_rows(self.parent_a)
+			self.assertEqual(len(rows_a), 1)
+			self.assertEqual(rows_a[0]["value"], f"{self.owner_a.name}-row")
+
+			self.assertEqual(self._child_rows(self.parent_b), [])
+		finally:
+			frappe.set_user("Administrator")
+			clear_user_permissions_for_doctype(self.PARENT, self.USER)
 
 
 class TestReportView(FrappeTestCase):

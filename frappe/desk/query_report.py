@@ -66,6 +66,32 @@ def get_report_doc(report_name):
 	return doc
 
 
+@frappe.whitelist()
+def get_print_format_data(print_format: str):
+	pf = frappe.db.get_value(
+		"Print Format",
+		{"name": print_format, "disabled": 0, "print_format_for": "Report"},
+		["report", "html", "css"],
+		as_dict=True,
+	)
+	if not pf:
+		frappe.throw(
+			_("{0} is not an enabled Print Format for a Report").format(frappe.bold(print_format)),
+			frappe.DoesNotExistError,
+		)
+
+	# get_report_doc enforces the referenced Report's own permission model before we hand out its print format
+	report = get_report_doc(pf.report)
+
+	if not frappe.has_permission(report.ref_doctype, "print"):
+		frappe.throw(
+			_("You don't have permission to print: {0}").format(_(report.ref_doctype)),
+			frappe.PermissionError,
+		)
+
+	return {"html": pf.html, "css": pf.css}
+
+
 def get_report_result(report, filters):
 	res = None
 
@@ -273,7 +299,15 @@ def _run(
 
 				dn = filters.pop("prepared_report_name", None)
 				if dn:
-					frappe.has_permission("Prepared Report", "read", dn, throw=True)
+					prepared_for = frappe.db.get_value(
+						"Prepared Report", {"name": dn, "owner": user}, "report_name"
+					)
+					if prepared_for != report_name and (
+						not prepared_for
+						or not frappe.db.exists("Report", prepared_for)
+						or get_reference_report(frappe.get_doc("Report", prepared_for)).name != report.name
+					):
+						frappe.has_permission("Prepared Report", "read", dn, throw=True)
 			else:
 				dn = ""
 			result = get_prepared_report_result(report, filters, dn, user)
@@ -301,11 +335,18 @@ def add_custom_column_data(custom_columns, result):
 			doctype_names_from_custom_field.append(doctype_name)
 		column["fieldname"] = column["fieldname"].split("-")[0]
 
-	custom_column_data = get_data_for_custom_report(custom_columns, result)
+	pending_columns = custom_columns
 
-	for column in custom_columns:
-		key = (column.get("doctype"), column.get("fieldname"))
-		if key in custom_column_data:
+	while pending_columns:
+		custom_column_data = get_data_for_custom_report(pending_columns, result)
+		unresolved_columns = []
+
+		for column in pending_columns:
+			key = (column.get("doctype"), column.get("fieldname"))
+			if key not in custom_column_data:
+				unresolved_columns.append(column)
+				continue
+
 			for row in result:
 				link_field = column.get("link_field")
 
@@ -321,6 +362,11 @@ def add_custom_column_data(custom_columns, result):
 				if key[0] in doctype_names_from_custom_field:
 					column["fieldname"] = column.get("id")
 				row[column.get("fieldname")] = custom_column_data.get(key).get(row_reference)
+
+		if len(unresolved_columns) == len(pending_columns):
+			break
+
+		pending_columns = unresolved_columns
 
 	return result
 
@@ -434,7 +480,7 @@ def _export_query(form_params, csv_params, populate_response=True):
 		)
 		return
 
-	format_fields(data)
+	format_fields(data, file_format_type)
 	xlsx_data, column_widths = build_xlsx_data(
 		data,
 		visible_idx,
@@ -476,7 +522,9 @@ def valid_report_name(report_name, suffix):
 	return False
 
 
-def format_fields(data: frappe._dict) -> None:
+def format_fields(data: frappe._dict, file_format_type: str | None = None) -> None:
+	stringify_dates = file_format_type != "Excel"
+
 	for i, col in enumerate(data.columns):
 		if col.get("fieldtype") == "Duration":
 			for row in data.result:
@@ -490,18 +538,24 @@ def format_fields(data: frappe._dict) -> None:
 				val = row.get(index) if isinstance(row, dict) else row[index]
 				if val:
 					row[index] = round(val, col.get("precision"))
-		elif col.get("fieldtype") == "Date":
+		elif col.get("fieldtype") == "Date" and stringify_dates:
 			for row in data.result:
 				index = col.get("fieldname") if isinstance(row, dict) else i
 				val = row.get(index) if isinstance(row, dict) else row[index]
 				if val:
 					row[index] = formatdate(val)
-		elif col.get("fieldtype") == "Datetime":
+		elif col.get("fieldtype") == "Datetime" and stringify_dates:
 			for row in data.result:
 				index = col.get("fieldname") if isinstance(row, dict) else i
 				val = row.get(index) if isinstance(row, dict) else row[index]
 				if val:
 					row[index] = format_datetime(val)
+		elif col.get("fieldtype") in ("Link", "Dynamic Link"):
+			for row in data.result:
+				index = col.get("fieldname") if isinstance(row, dict) else i
+				val = row.get(index) if isinstance(row, dict) else row[index]
+				if isinstance(val, str) and val.startswith("'") and val.endswith("'"):
+					row[index] = val[1:-1]
 
 
 def build_xlsx_data(
