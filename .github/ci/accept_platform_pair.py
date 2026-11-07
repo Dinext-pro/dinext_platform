@@ -1,7 +1,7 @@
 """Install this Frappe 15.123.0 pair on a fresh bench and, when asked, run one Cypress spec.
 
 The sibling app comes from the paired upgrade branch. This does not touch a
-running site. Compatibility acceptance stops after migrate, build and ping.
+running site. Compatibility acceptance includes the final-policy regressions.
 Cypress acceptance then completes setup and runs the upstream awesome-bar spec.
 """
 import json
@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import xml.etree.ElementTree as ET
 
 role = sys.argv[1]
 if role not in {"compatibility", "cypress"}:
@@ -101,7 +102,22 @@ if version.stdout.count(expected_version) < 2:
     raise SystemExit("Expected Frappe and ERPNext " + expected_version)
 
 if role == "compatibility":
-    print("Paired install, migrate and build passed.", flush=True)
+    run("bench", "pip", "install", "unittest-xml-reporting~=3.2.0", cwd=bench)
+    run("bench", "--site", site, "set-config", "allow_tests", "True", "--parse", cwd=bench)
+    junit = bench / "final-permission-query-conditions.xml"
+    run(
+        "bench", "--site", site, "run-tests",
+        "--module", "frappe.tests.test_final_permission_query_conditions",
+        "--skip-test-records", "--skip-before-tests", "--junit-xml-output", str(junit),
+        cwd=bench,
+    )
+    results = ET.parse(junit).getroot()
+    suites = [results] if results.tag == "testsuite" else results.findall(".//testsuite")
+    totals = {key: sum(int(suite.get(key, "0")) for suite in suites)
+              for key in ("tests", "failures", "errors", "skipped")}
+    if totals != {"tests": 8, "failures": 0, "errors": 0, "skipped": 0}:
+        raise SystemExit("Final permission-query regressions did not all run and pass: " + repr(totals))
+    print("Paired install, migrate, build and eight final-policy regressions passed.", flush=True)
     sys.exit(0)
 
 setup_args = {
