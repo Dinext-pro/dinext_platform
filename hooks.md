@@ -35,3 +35,29 @@
 
 1. `permission_query_conditions:[doctype]` - method to return additional query conditions at time of report / list etc.
 1. `has_permission:[doctype]` - method to call permissions to check at individual level
+1. `final_permission_query_conditions:[doctype]` - opt-in conditions ANDed after ordinary role/user/share conditions; see below.
+
+
+#### Final permission query conditions (Dinext v15)
+
+Use `final_permission_query_conditions = {"Protected DocType": "app.permissions.final_conditions"}`
+when a document share must not override an app's row policy. The callable receives
+`user` and `doctype` and returns a trusted, escaped SQL condition or an empty string.
+Conditions are ANDed after the complete role/User Permission/owner/DocShare expression,
+including the only-shared path. Linked-document JOIN policies apply the same hook
+using their table alias. Unconfigured DocTypes keep their existing behavior.
+`ignore_permissions=True` bypasses this hook for explicitly trusted queries.
+
+This small platform patch is required for Dinext approval audit isolation:
+`permission_query_conditions` is evaluated before an outer DocShare OR, so an app
+cannot express this policy through the existing hook alone. Endpoint overrides do
+not cover server-side `frappe.get_list`. The patch avoids global monkeypatching and
+keeps ordinary constraints in place. Apps can require
+`DatabaseQuery.final_permission_query_conditions_version >= 1` and fail closed on
+older platforms; this attribute describes the hook contract, not the Frappe version.
+
+For v15 updates, retain the final AND after sharing and run
+`frappe.tests.test_final_permission_query_conditions` plus the consuming app's endpoint
+tests. For v16, first check whether upstream supplies an equivalent final-policy hook;
+port this extension only if needed. Remove the local patch and capability guard after
+migrating consumers to a verified upstream equivalent. No schema migration is needed.

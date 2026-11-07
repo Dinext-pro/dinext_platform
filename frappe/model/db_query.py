@@ -284,6 +284,9 @@ def _raise_illegal_query():
 
 
 class DatabaseQuery:
+	# Capability contract for apps that require policy checks after DocShare.
+	final_permission_query_conditions_version = 1
+
 	def __init__(self, doctype, user=None):
 		self.doctype = doctype
 		self.tables = []
@@ -888,6 +891,9 @@ from {tables}
 			if script_cond := script.get_permission_query_conditions(self.user):
 				conditions.append(script_cond.replace(f"`tab{doctype}`.", f"{table_alias}."))
 
+		if final_condition := self.get_final_permission_query_conditions(doctype):
+			conditions.append(final_condition.replace(f"`tab{doctype}`.", f"{table_alias}."))
+
 		return " and ".join(conditions)
 
 	def check_read_permission(self, doctype: str, parent_doctype: str | None = None):
@@ -1403,6 +1409,11 @@ from {tables}
 				if parent_condition:
 					conditions += (" and " + parent_condition) if conditions else parent_condition
 
+			# Final app policies are conjunctive even when ordinary role/user
+			# conditions were widened by a share. Do not move this inside that OR.
+			if final_condition := self.get_final_permission_query_conditions():
+				conditions = f"({conditions}) and ({final_condition})" if conditions else final_condition
+
 			return conditions
 
 		else:
@@ -1515,6 +1526,18 @@ from {tables}
 				conditions.append(condition)
 
 		return " and ".join(conditions) if conditions else ""
+
+	def get_final_permission_query_conditions(self, doctype: str | None = None) -> str:
+		"""Opt-in per-DocType policies that shares cannot widen."""
+		if self.flags.ignore_permissions:
+			return ""
+		doctype = doctype or self.doctype
+		hooks = frappe.get_hooks("final_permission_query_conditions", {})
+		conditions = []
+		for method in hooks.get(doctype, []):
+			if condition := frappe.call(method, self.user, doctype=doctype):
+				conditions.append(f"({condition})")
+		return " and ".join(conditions)
 
 	def set_order_by(self, args):
 		if self.order_by and self.order_by != "KEEP_DEFAULT_ORDERING":
