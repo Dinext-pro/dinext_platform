@@ -1,14 +1,27 @@
 name: Dinext acceptance
 on:
+  push:
+    tags: ['v*', 'dinext/**']
+  workflow_call: {}
   pull_request:
     branches: ['dinext/main/v15']
   workflow_dispatch: {}
 permissions:
   contents: read
 concurrency:
-  group: dinext-acceptance-${{ github.ref }}
+  group: dinext-acceptance-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  release-context:
+    name: Tag source context
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Verify native tag context
+        run: |
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF" = "refs/tags/$GITHUB_REF_NAME"
   acceptance:
     name: ${{ matrix.role == 'cypress' && 'Cypress acceptance' || 'Compatibility acceptance' }}
     runs-on: ubuntu-24.04
@@ -33,7 +46,7 @@ jobs:
     env:
       PAIR_APP: frappe
       OTHER_REPO: Dinext-pro/dinext_erp
-      OTHER_REF: dinext/upgrade/v15.123.0
+      OTHER_REF: 548e80297397ba5d3ca4fb111a923fe784a37f4e
       CI: 'true'
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
