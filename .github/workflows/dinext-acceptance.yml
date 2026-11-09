@@ -46,7 +46,7 @@ jobs:
     env:
       PAIR_APP: frappe
       OTHER_REPO: Dinext-pro/dinext_erp
-      OTHER_REF: dinext/upgrade/v15.123.0
+      OTHER_REF: 548e80297397ba5d3ca4fb111a923fe784a37f4e
       CI: 'true'
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
